@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TET Player v3.1 (Snapshot)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: monospace; }
+        #info {
+            position: absolute; top: 10px; left: 10px; color: #0f0;
+            background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid #0f0;
+            pointer-events: none;
+        }
+        #drop-zone-msg {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #fff; font-size: 24px; font-weight: bold; 
+            background: rgba(0, 255, 0, 0.2); border: 4px dashed #0f0; padding: 40px;
+            display: none; pointer-events: none;
+        }
+        #controls-help {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            color: #fff; text-align: center; width: 100%; pointer-events: none;
+        }
+        .highlight { color: #fff; font-weight: bold; }
+        .key { border: 1px solid #aaa; padding: 2px 6px; border-radius: 4px; color: #fff; background: #333; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+<div id="info">
+    <div style="font-size: 16px; margin-bottom: 5px;">TET PLAYER v3.1</div>
+    <div>Mode: <span class="highlight">Snapshot Ready</span></div>
+    <div>File: <span id="filename" class="highlight">System Calibration</span></div>
+    <div style="margin-top: 5px; font-size: 12px; color: #aaa;">Drag & Drop Image | Press 'S' to Save</div>
+    <div style="margin-top: 10px;" id="status">Status: Ready</div>
+</div>
+
+<div id="drop-zone-msg">DROP IMAGE TO LOAD</div>
+
+<div id="controls-help">
+    <div class="hud-text">
+        <span class="key">SPACE</span> Pause/Play &nbsp;|&nbsp; 
+        <span class="key">←</span> <span class="key">→</span> Scrub &nbsp;|&nbsp; 
+        <span class="key">S</span> Snapshot
+    </div>
+</div>
+
+<script>
+    // --- 1. DEFAULT CALIBRATION TEXTURE ---
+    function createCalibrationTexture() {
+        const size = 1024;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#111'; ctx.fillRect(0, 0, size, size);
+        ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2;
+        const step = size / 8;
+        for (let i = 0; i <= size; i += step) {
+            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, size); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(size, i); ctx.stroke();
+        }
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 200px Arial';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText("DROP", size/2, size*0.3); ctx.fillText("FILE", size/2, size*0.7);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 20; ctx.strokeRect(0, 0, size, size);
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    // --- 2. SCENE SETUP ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(
+        window.innerWidth / -40, window.innerWidth / 40,
+        window.innerHeight / 40, window.innerHeight / -40,
+        1, 1000
+    );
+    camera.position.set(25, 20, 25);
+    camera.lookAt(0, 0, 0);
+
+    // CRITICAL UPDATE: preserveDrawingBuffer allows us to take screenshots
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.05;
+
+    // --- 3. SHADER ENGINE ---
+    const xSlitVertexShader = `
+        uniform float slitDist;
+        uniform float focalLen;
+        uniform float objectZ;
+        varying vec2 vUv;
+        varying float vDepth;
+        void main() {
+            vUv = uv;
+            vec3 pos = position;
+            float worldZ = pos.z + objectZ;
+            float u = focalLen * pos.x / (worldZ + slitDist + 0.0001);
+            float v = focalLen * pos.y / (worldZ - slitDist + 0.0001);
+            vDepth = worldZ;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(u, v, 0.0, 1.0);
+        }
+    `;
+
+    const xSlitFragmentShader = `
+        uniform sampler2D map;
+        uniform float slitDist;
+        varying vec2 vUv;
+        varying float vDepth;
+        void main() {
+            vec4 texColor = texture2D(map, vUv);
+            vec3 tint = vec3(1.0);
+            if (vDepth > -slitDist && vDepth < slitDist) tint = vec3(1.0, 0.9, 1.0);
+            else if (vDepth > slitDist) tint = vec3(1.0, 1.0, 0.8);
+            else if (vDepth < -slitDist) tint = vec3(0.8, 0.9, 1.0);
+            gl_FragColor = vec4(texColor.rgb * tint, 1.0);
+        }
+    `;
+
+    const uniforms = {
+        map: { value: createCalibrationTexture() },
+        slitDist: { value: 2.0 },
+        focalLen: { value: 10.0 },
+        objectZ: { value: -10.0 }
+    };
+
+    const material = new THREE.ShaderMaterial({
+        vertexShader: xSlitVertexShader,
+        fragmentShader: xSlitFragmentShader,
+        uniforms: uniforms,
+        side: THREE.DoubleSide
+    });
+
+    const geometry = new THREE.BoxGeometry(2.0, 2.0, 2.0, 100, 100, 100);
+    const cube = new THREE.Mesh(geometry, material);
+    scene.add(cube);
+
+    // --- 4. DRAG AND DROP ---
+    const dropMsg = document.getElementById('drop-zone-msg');
+    const fileLabel = document.getElementById('filename');
+    window.addEventListener('dragover', (e) => { e.preventDefault(); dropMsg.style.display = 'block'; });
+    window.addEventListener('dragleave', (e) => { dropMsg.style.display = 'none'; });
+    window.addEventListener('drop', (e) => {
+        e.preventDefault(); dropMsg.style.display = 'none';
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+            const file = e.dataTransfer.files[0];
+            if (!file.type.match('image.*')) { alert("Please drop an image file."); return; }
+            fileLabel.innerText = file.name;
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    const newTexture = new THREE.Texture(img);
+                    newTexture.needsUpdate = true;
+                    uniforms.map.value = newTexture;
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    // --- 5. ANIMATION & SNAPSHOT LOGIC ---
+    let isPaused = false;
+    let time = 0;
+    const statusEl = document.getElementById('status');
+
+    function takeSnapshot() {
+        // Force a render to ensure the buffer is fresh
+        renderer.render(scene, camera);
+        const dataURL = renderer.domElement.toDataURL("image/png");
+        const link = document.createElement('a');
+        link.download = 'tet_capture_' + Date.now() + '.png';
+        link.href = dataURL;
+        link.click();
+        
+        // Flash effect
+        statusEl.innerHTML = "<span class='highlight'>SNAPSHOT SAVED!</span>";
+        setTimeout(() => { statusEl.innerHTML = "Status: Ready"; }, 1000);
+    }
+
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') isPaused = !isPaused;
+        if (e.code === 'KeyS') takeSnapshot(); // 'S' for Snapshot
+        if (isPaused) {
+            if (e.code === 'ArrowRight') time += 0.02;
+            if (e.code === 'ArrowLeft') time -= 0.02;
+        }
+    });
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        if (!isPaused) time += 0.005;
+        const zPos = Math.sin(time) * 8.0;
+        uniforms.objectZ.value = zPos;
+        cube.rotation.x = time * 0.15;
+        cube.rotation.y = time * 0.1;
+        
+        let region = "GHOST PLANE";
+        if (zPos < -2.0) region = "ZONE A";
+        else if (zPos > 2.0) region = "ZONE C";
+        
+        if (statusEl.innerText.indexOf("SNAPSHOT") === -1) {
+            statusEl.innerHTML = `Z: ${zPos.toFixed(2)} | Region: <span class="highlight">${region}</span>`;
+        }
+        renderer.render(scene, camera);
+    }
+    window.addEventListener('resize', () => {
+        const aspect = window.innerWidth / window.innerHeight;
+        const frustumSize = 40;
+        camera.left = -frustumSize * aspect / 2;
+        camera.right = frustumSize * aspect / 2;
+        camera.top = frustumSize / 2;
+        camera.bottom = -frustumSize / 2;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    animate();
+</script>
+</body>
+</html>
